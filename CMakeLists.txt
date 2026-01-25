@@ -1,6 +1,5 @@
 cmake_minimum_required(VERSION 3.1)
 project(video_pipe)
-set(CMAKE_CXX_STANDARD 14)
 
 find_package(PkgConfig REQUIRED)
 
@@ -10,16 +9,20 @@ message("GST_INCLUDE_DIRS = ${GST_INCLUDE_DIRS}")
 message("GST_LIBRARY_DIRS = ${GST_LIBRARY_DIRS}")
 message("GST_LIBRARIES = ${GST_LIBRARIES}")
 
-link_directories( ${GST_LIBRARY_DIRS}  )
-include_directories( ${GST_INCLUDE_DIRS}  )
-
-
 # OpenCV ${OpenCV_LIBS}, used for some examples
 find_package(OpenCV REQUIRED)
 message(STATUS "OpenCV Include dirs = ${OpenCV_INCLUDE_DIRS}")
 message(STATUS "OpenCV LIBRARIES = ${OpenCV_LIBS}")
 
+
 add_executable(${PROJECT_NAME} src/main.cpp)
-target_include_directories(${PROJECT_NAME} PUBLIC ${OpenCV_INCLUDE_DIRS})
-target_link_libraries(${PROJECT_NAME} ${GST_LIBRARIES} ${OpenCV_LIBS})
+
+target_compile_features(${PROJECT_NAME} PUBLIC cxx_std_17)
+
+target_include_directories(${PROJECT_NAME} PUBLIC ${OpenCV_INCLUDE_DIRS} PUBLIC ${GST_INCLUDE_DIRS}  PUBLIC ./include)
+
+target_link_libraries(${PROJECT_NAME} 
+    ${OpenCV_LIBS} ${GST_LIBRARY_DIRS} ${GST_LIBRARIES}
+    vitis_ai_library-yolov6 vitis_ai_library-dpu_task vitis_ai_library-xnnpp 
+    vitis_ai_library-model_config vitis_ai_library-math vart-util xir)
 

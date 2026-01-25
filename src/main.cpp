@@ -13,310 +13,293 @@
 #include <gst/app/gstappsink.h>
 
 #include <opencv2/opencv.hpp>
-
+#include <vitis/ai/yolov6.hpp>
+#include "process_result.hpp"
 
 //======================================================================================================================
 /// A simple assertion function + macro
-inline void myAssert(bool b, const std::string &s = "MYASSERT ERROR !") {
+inline void myAssert(bool b, const std::string &s = "Assersion error")
+{
     if (!b)
         throw std::runtime_error(s);
 }
 
-#define MY_ASSERT(x) myAssert(x, "MYASSERT ERROR :" #x)
+#define MY_ASSERT(x) myAssert(x, "Assersion error: " #x)
+
+
 
 //======================================================================================================================
 /// Check GStreamer error, exit on error
-inline void checkErr(GError *err) {
-    if (err) {
+inline void checkErr(GError *err)
+{
+    if (err)
+    {
         std::cerr << "checkErr : " << err->message << std::endl;
         exit(0);
     }
 }
 
+
+
 //======================================================================================================================
 /// Our global data
-struct GoblinData {
+struct GlobalData 
+{
     // The two pipelines
-    GstElement *goblinPipeline = nullptr;
-    GstElement *goblinSinkV = nullptr;
-    GstElement *elfPipeline = nullptr;
-    GstElement *elfSrcV = nullptr;
+    GstElement *inPipeline = nullptr;
+    GstElement *inPipelineSrc = nullptr;
+    GstElement *outPipeline = nullptr;
+    GstElement *outPipelineSink = nullptr;
 
-    /// Appsrc flag: when it's true, send the frames, otherwise wait
-    std::atomic_bool flagRunV{false};
-    /// True if the elf pipeline has initialized and started splaying
-    std::atomic_bool flagElfStarted{false};
+    /// when true, send the frames, otherwise wait
+    std::atomic_bool runFlag{false};
+    /// when true, output pipeline has initialized and started
+    std::atomic_bool outReady{false};
 };
+
+
 
 //======================================================================================================================
 /// Process a single bus message, log messages, exit on error, return false on eof
-static bool busProcessMsg(GstElement *pipeline, GstMessage *msg, const std::string &prefix) {
-    using namespace std;
-
+static bool busProcessMsg(GstElement *pipeline, GstMessage *msg, const std::string &prefix)
+{
     GstMessageType mType = GST_MESSAGE_TYPE(msg);
-    // cout <<"[" << prefix << "]: ";
-    switch (mType) {
+    switch (mType)
+    {
         case (GST_MESSAGE_ERROR):
-            // Parse error and exit program, hard exit
+            std::cout << "[" << prefix << "]";
+            /*
+                Parse error and exit program (hard exit)
+            */
             GError *err;
             gchar *dbg;
             gst_message_parse_error(msg, &err, &dbg);
-            cout << "ERR = " << err->message << " FROM " << GST_OBJECT_NAME(msg->src) << endl;
-            cout << "DBG = " << dbg << endl;
+            std::cout << "ERR = " << err->message << " FROM " << GST_OBJECT_NAME(msg->src) << std::endl;
+            std::cout << "DBG = " << dbg << std::endl;
             g_clear_error(&err);
             g_free(dbg);
             exit(1);
-        case (GST_MESSAGE_EOS) :
-            // Soft exit on EOS
-            cout << " EOS !" << endl;
+        case (GST_MESSAGE_EOS):
+            /*
+                end-of-stream (soft exit)
+            */
+            std::cout << "[" << prefix << "]: ";
+            std::cout << "EOS" << std::endl;
             return false;
         case (GST_MESSAGE_STATE_CHANGED):
-            // Parse state change, print extra info for pipeline only
-            cout << "State changed !" << endl;
+            /*
+                Parse state change, print extra info for pipeline only
+            */
+            std::cout << "[" << prefix << "]: ";
+            std::cout << "State changed" << std::endl;
+
             if (GST_MESSAGE_SRC(msg) == GST_OBJECT(pipeline)) {
                 GstState sOld, sNew, sPenging;
                 gst_message_parse_state_changed(msg, &sOld, &sNew, &sPenging);
-                cout << "Pipeline changed from " << gst_element_state_get_name(sOld) << " to " <<
-                     gst_element_state_get_name(sNew) << endl;
+                std::cout << "Pipeline changed from " << gst_element_state_get_name(sOld) << " to " << gst_element_state_get_name(sNew) << std::endl;
             }
             break;
-        case (GST_MESSAGE_STEP_START):
-            cout << "STEP START !" << endl;
-            break;
-        case (GST_MESSAGE_STREAM_STATUS):
-            cout << "STREAM STATUS !" << endl;
-            break;
-        case (GST_MESSAGE_ELEMENT):
-            cout << "MESSAGE ELEMENT !" << endl;
-            break;
-        // You can add more stuff here if you want
-
         default:
-            // cout << endl;
             break;
     }
     return true;
 }
 
+
+
 //======================================================================================================================
 /// Run the message loop for one bus
-void codeThreadBus(GstElement *pipeline, GoblinData &data, const std::string &prefix) {
-    using namespace std;
+void processMsg(GstElement *pipeline, GlobalData &data, const std::string &prefix)
+{
     GstBus *bus = gst_element_get_bus(pipeline);
 
     int res;
     while (true) {
         GstMessage *msg = gst_bus_timed_pop(bus, GST_CLOCK_TIME_NONE);
-        MY_ASSERT(msg);
         res = busProcessMsg(pipeline, msg, prefix);
         gst_message_unref(msg);
         if (!res)
             break;
     }
     gst_object_unref(bus);
-    cout << "BUS THREAD FINISHED : " << prefix << endl;
+    std::cout << "Bus thread finished: " << prefix << std::endl;
 }
+
+
 
 //======================================================================================================================
 /// Take frames from appsink, process with opencv, send to appsrc
-void codeThreadProcessV(GoblinData &data) {
-    using namespace std;
-    using namespace cv;
+void processFrames(GlobalData &data, const std::string &model) 
+{
+    auto yolo = vitis::ai::YOLOv6::create(model, true);
 
-    for (;;) {
-        // We wait until ELF wants data, but only if ELF is already started
-        while (data.flagElfStarted && !data.flagRunV) {
-            cout << "(wait)" << endl;
-            this_thread::sleep_for(std::chrono::milliseconds(10));
+    if (!yolo)
+    {   // supress coverity complain
+        std::cout <<"create error"  << std::endl;
+        exit(1);
+    }
+
+    for (;;)
+    {
+        // Wait until output pipeline needs data
+        while (!data.runFlag) {
+            std::cout << "(wait)" << std::endl;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
 
-        // Check for Goblin EOS
-        if (gst_app_sink_is_eos(GST_APP_SINK(data.goblinSinkV))) {
-            cout << "GOBLIN EOS !" << endl;
+        // Check for input stream flag: end-of-stream
+        if (gst_app_sink_is_eos(GST_APP_SINK(data.inPipelineSrc))) {
+            std::cout << "Recieved eos from input p" << std::endl;
             break;
         }
 
-        // Pull the sample from Goblin appsink
-        GstSample *sample = gst_app_sink_pull_sample(GST_APP_SINK(data.goblinSinkV));
+        // Pull the input pipeline
+        GstSample *sample = gst_app_sink_pull_sample(GST_APP_SINK(data.inPipelineSrc));
         if (sample == nullptr) {
-            cout << "NO sample !" << endl;
+            std::cout << "No frame" << std::endl;
             break;
-        }
-
-        // Get width and height from sample caps
-        GstCaps *caps = gst_sample_get_caps(sample);
-        myAssert(caps != nullptr);
-
-        GstStructure *s = gst_caps_get_structure(caps, 0);
-        int imW, imH;
-        MY_ASSERT(gst_structure_get_int(s, "width", &imW));
-        MY_ASSERT(gst_structure_get_int(s, "height", &imH));
-        int f1, f2;
-        MY_ASSERT(gst_structure_get_fraction(s, "framerate", &f1, &f2));
-        // cout << "Sample: W = " << imW << ", H = " << imH << ", framerate = " << f1 << " / " << f2 << endl;
-
-        // Check if ELF is initialized
-        if (!data.flagElfStarted) {
-            // // Use sample caps verbatim to ELF appsrc and re-negotiate
-            // // Make a copy to be safe (probably not needed)
-            // GstCaps *capsElf = gst_caps_copy(caps);
-            // g_object_set(data.elfSrcV, "caps", capsElf, nullptr);
-            // gst_caps_unref(capsElf);
-
-            // Now we can play the ELF pipeline
-            GstStateChangeReturn ret = gst_element_set_state(data.elfPipeline, GST_STATE_PLAYING);
-            MY_ASSERT(ret != GST_STATE_CHANGE_FAILURE);
-            data.flagElfStarted = true;
         }
 
         // Copy data from the sample to cv::Mat()
+        int imH = 1080;
+        int imW = 1920;
         GstBuffer *bufferIn = gst_sample_get_buffer(sample);
         GstMapInfo mapIn;
         myAssert(gst_buffer_map(bufferIn, &mapIn, GST_MAP_READ));
         myAssert(mapIn.size == imW * imH * 3);
-        // Don't forget the Timestamp
         // uint64_t pts = bufferIn->pts;
         // uint64_t duration = bufferIn->duration;
 
         // Clone to be safe, we don't want to modify the input buffer
-        Mat frame = Mat(imH, imW, CV_8UC3, (void *) mapIn.data).clone();
+        cv::Mat frame = cv::Mat(imH, imW, CV_8UC3, (void *) mapIn.data).clone();
         gst_buffer_unmap(bufferIn, &mapIn);
+        gst_sample_unref(sample);
 
-        // Modify the frame: apply photo negative to the middle 1/9 of the image
-        // Mat frameMid(frame, Rect2i(imW/3, imH/3, imW/3, imH/3));
-        // bitwise_not(frameMid, frameMid);
-        // Create the output bufer and send it to elfSrc
+        // auto result = yolo->run(frame);
+        // cv::Mat frame_out = process_result(frame, result, false);
+
+        // Create the output bufer and send it to output pipeline
         int bufferSize = frame.cols * frame.rows * 3;
         GstBuffer *bufferOut = gst_buffer_new_and_alloc(bufferSize);
         GstMapInfo mapOut;
         gst_buffer_map(bufferOut, &mapOut, GST_MAP_WRITE);
         memcpy(mapOut.data, frame.data, bufferSize);
         gst_buffer_unmap(bufferOut, &mapOut);
+
         // Copy the input packet timestamp
         // bufferOut->pts = pts;
         // bufferOut->duration = duration;
-        GstFlowReturn ret = gst_app_src_push_buffer(GST_APP_SRC(data.elfSrcV), bufferOut);
 
-        switch (ret)
+
+        GstFlowReturn ret = gst_app_src_push_buffer(GST_APP_SRC(data.outPipelineSink), bufferOut);
+        if (ret != GST_FLOW_OK)
         {
-            case(GST_FLOW_OK):
-                cout << "OK" << endl;
-                break;
-            case(GST_FLOW_FLUSHING):
-                cout << "Flushing" << endl;
-                break;
-            case(GST_FLOW_EOS):
-                cout << "EOS" << endl;
-                break;
-            default:
-                cout << "This one I don't know huh" << endl;
-                break;
-
+            gst_buffer_unref(bufferOut);
         }
-
     }
     // Send EOS to ELF
-    gst_app_src_end_of_stream(GST_APP_SRC(data.elfSrcV));
+    gst_app_src_end_of_stream(GST_APP_SRC(data.outPipelineSink));
 }
+
+
+
 //======================================================================================================================
 /// Callback called when the pipeline wants more data
-static void startFeed(GstElement *source, guint size, GoblinData *data) {
+static void startFeed(GstElement *source, guint size, GlobalData *data)
+{
     using namespace std;
-    if (!data->flagRunV) {
-        cout << "startFeed !" << endl;
-        data->flagRunV = true;
+    if (!data->runFlag) {
+        cout << "Need data" << endl;
+        data->runFlag = true;
     }
 }
+
+
 
 //======================================================================================================================
 /// Callback called when the pipeline wants no more data for now
-static void stopFeed(GstElement *source, GoblinData *data) {
+static void stopFeed(GstElement *source, GlobalData *data)
+{
     using namespace std;
-    if (data->flagRunV) {
-        cout << "stopFeed !" << endl;
-        data->flagRunV = false;
+    if (data->runFlag)
+    {
+        cout << "Enough data" << endl;
+        data->runFlag = false;
     }
 }
 
+
+
 //======================================================================================================================
-int main(int argc, char **argv){
-    using namespace std;
-    cout << "VIDEO3: Two pipelines, with custom video processing in the middle" << endl;
+int main(int argc, char **argv)
+{
+
+    if (argc != 2)
+    {
+        std::cout << "Usage: "<< argv[0] << " <model_path>" << std::endl;
+        exit(1);
+    }
+    std::string model = argv[1];
 
     // Init gstreamer
     gst_init(&argc, &argv);
 
-    if (argc != 2) {
-        cout << "Usage:\nvideo3 <video_file>" << endl;
-        return 0;
-    }
-    string fileName(argv[1]);
-    cout << "Playing file : " << fileName << endl;
-
     // Our global data
-    GoblinData data;
+    GlobalData data;
 
-    //Input pipeline
-    string pipeStrGoblin = "filesrc location="+fileName+" !"
-        " qtdemux name=videodemux videodemux.video_0 !"
-        " h264parse ! omxh264dec ! video/x-raw,format=NV12,width=1920,height=1200,framerate=30/1 !"
-        " videoconvert !"
-        " video/x-raw,format=RGB !"
-        " appsink name=goblin_sink sync=false max-buffers=32";
+    // Input pipeline
+    std::string inPipeline = "v4l2src device=/dev/video0 io-mode=4 ! video/x-raw,width=1920,height=1080,format=RGB,framerate=30/1 !"
+                        "appsink name=input_src sync=true max-buffers=2";
 
-    // string pipeStrGoblin = "videotestsrc pattern=ball motion=1 flip=true ! video/x-raw,format=RGB,width=1920,height=1200,framerate=30/1 !"
-    //     " appsink name=goblin_sink sync=false max-buffers=32";
+
+
     // Output pipeline
-    string pipeStrElf = "appsrc name=elf_src do-timestamp=true format=time caps=video/x-raw,format=RGB,width=1920,height=1200,framerate=30/1 !"
+    std::string outPipeline = "appsrc name=output_sink do-timestamp=true format=time caps=video/x-raw,format=RGB,width=1920,height=1080,framerate=30/1 !"
                         " queue !"
-                        " kmssink bus-id=fd4a0000.display sync=true";
+                        " kmssink bus-id=fd4a0000.display sync=true fullscreen-overlay=true";
+    
+    
     
     GError *err = nullptr;
-    data.goblinPipeline = gst_parse_launch(pipeStrGoblin.c_str(), &err);
+    data.inPipeline = gst_parse_launch(inPipeline.c_str(), &err);
     checkErr(err);
-    MY_ASSERT(data.goblinPipeline);
-    data.goblinSinkV = gst_bin_get_by_name(GST_BIN (data.goblinPipeline), "goblin_sink");
-    MY_ASSERT(data.goblinSinkV);
+    data.inPipelineSrc = gst_bin_get_by_name(GST_BIN(data.inPipeline), "input_src");
 
-    // Set up ELF (output pipeline)
-    // Note that appsrc does not have full caps yet as usual
 
-    data.elfPipeline = gst_parse_launch(pipeStrElf.c_str(), &err);
+    data.outPipeline = gst_parse_launch(outPipeline.c_str(), &err);
     checkErr(err);
-    MY_ASSERT(data.elfPipeline);
-    data.elfSrcV = gst_bin_get_by_name(GST_BIN (data.elfPipeline), "elf_src");
-    MY_ASSERT(data.elfSrcV);
-    // Add calbacks like in video2
-    g_signal_connect(data.elfSrcV, "need-data", G_CALLBACK(startFeed), &data);
-    g_signal_connect(data.elfSrcV, "enough-data", G_CALLBACK(stopFeed), &data);
+    data.outPipelineSink = gst_bin_get_by_name(GST_BIN(data.outPipeline), "output_sink");
 
+    // Add calbacks
+    g_signal_connect(data.outPipelineSink, "need-data", G_CALLBACK(startFeed), &data);
+    g_signal_connect(data.outPipelineSink, "enough-data", G_CALLBACK(stopFeed), &data);
 
-    // Play the Goblin pipeline only (Elf will start a bit later)
-    MY_ASSERT(gst_element_set_state(data.goblinPipeline, GST_STATE_PLAYING));
+    // Play the input and output pipeline only
+    gst_element_set_state(data.inPipeline, GST_STATE_PLAYING);
+    gst_element_set_state(data.outPipeline, GST_STATE_PLAYING);
 
-
-    // Video processing thread (from goblin appsink to elf appsrc)
-    thread threadProcessV([&data]{
-        codeThreadProcessV(data);
+    // Video processing thread
+    std::thread ThreadProcessFrames([&data, &model]{
+        processFrames(data, model);
     });
-    // Now we need two bus threads: one for each pipeline !
-    thread threadBusGoblin([&data]{
-        codeThreadBus(data.goblinPipeline, data, "GOBLIN");
+    // Now we need two bus threads: one for each pipeline
+    std::thread ThreadprocessMsgIn([&data]{
+        processMsg(data.inPipeline, data, "Input pipeline");
     });
-    thread threadBusElf([&data]{
-        codeThreadBus(data.elfPipeline, data, "ELF");
+    std::thread ThreadprocessMsgOut([&data]{
+        processMsg(data.outPipeline, data, "Output pipeline");
     });
 
     // Wait for threads
-    threadProcessV.join();
-    threadBusGoblin.join();
-    threadBusElf.join();
+    ThreadProcessFrames.join();
+    ThreadprocessMsgIn.join();
+    ThreadprocessMsgOut.join();
 
     // Destroy the two pipelines
-    gst_element_set_state(data.goblinPipeline, GST_STATE_NULL);
-    gst_object_unref(data.goblinPipeline);
-    gst_element_set_state(data.elfPipeline, GST_STATE_NULL);
-    gst_object_unref(data.elfPipeline);
+    gst_element_set_state(data.inPipeline, GST_STATE_NULL);
+    gst_object_unref(data.inPipeline);
+    gst_element_set_state(data.outPipeline, GST_STATE_NULL);
+    gst_object_unref(data.outPipeline);
 
     return 0;
 }
