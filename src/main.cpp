@@ -64,6 +64,12 @@ struct FrameBuffer {
     std::atomic<int> index{0};  // which frame is current
 };
 
+struct ResultBuffer {
+    vitis::ai::YOLOv6Result output[2];
+    std::atomic<int> index{0};  // which result is current
+
+};
+
 
 //======================================================================================================================
 /// Process a single bus message, log messages, exit on error, return false on eof
@@ -132,8 +138,9 @@ void processMsg(GstElement *pipeline, GlobalData &data, const std::string &prefi
 }
 
 
-
-void runYolo(const std::string &model, GlobalData &data,  FrameBuffer &fb)
+//======================================================================================================================
+/// Run the message loop for one bus
+void runYolo(const std::string &model, GlobalData &data,  FrameBuffer &fb, ResultBuffer &result)
 {
     auto yolo = vitis::ai::YOLOv6::create(model, true);
 
@@ -146,11 +153,15 @@ void runYolo(const std::string &model, GlobalData &data,  FrameBuffer &fb)
     for (;;)
     {
         ///////////////////////////////////////////////////////////////////////
-        // Find which index is next
-        int current = fb.index.load();
+        // Find which index is current
+        int frame_current = fb.index.load();
+        int result_next = 1 - result.index.load();
 
         // Run yolo on the current frame
-        auto result = yolo->run(fb.frames[current]);
+        result.output[result_next] = yolo->run(fb.frames[frame_current]);
+
+        // Publish result (atomic flip)
+        result.index.store(result_next);
         ///////////////////////////////////////////////////////////////////////
 
         if (data.endFlag)
@@ -159,15 +170,15 @@ void runYolo(const std::string &model, GlobalData &data,  FrameBuffer &fb)
         }
 
     }
+
+    
 }
-
-
 
 
 
 //======================================================================================================================
 /// Take frames from appsink, process with opencv, send to appsrc
-void processFrames(GlobalData &data, FrameBuffer &fb)
+void processFrames(GlobalData &data, FrameBuffer &fb, ResultBuffer &result)
 {
     for (;;)
     {
@@ -217,12 +228,20 @@ void processFrames(GlobalData &data, FrameBuffer &fb)
         ///////////////////////////////////////////////////////////////////////
 
 
+        ///////////////////////////////////////////////////////////////////////
+        // Find which result is current
+        int current = result.index.load();
+
+        cv::Mat frame_out = process_result(frame, result.output[current], false);
+        ///////////////////////////////////////////////////////////////////////
+    
+
         // Create the output bufer and send it to output pipeline
-        int bufferSize = frame.cols * frame.rows * 3;
+        int bufferSize = imW * imH * 3;
         GstBuffer *bufferOut = gst_buffer_new_and_alloc(bufferSize);
         GstMapInfo mapOut;
         gst_buffer_map(bufferOut, &mapOut, GST_MAP_WRITE);
-        memcpy(mapOut.data, frame.data, bufferSize);
+        memcpy(mapOut.data, frame_out.data, bufferSize);
         gst_buffer_unmap(bufferOut, &mapOut);
 
         // Copy the input packet timestamp
@@ -287,6 +306,7 @@ int main(int argc, char **argv)
     // Our global data
     GlobalData data;
     FrameBuffer fb;
+    ResultBuffer result;
 
     // Input pipeline
     std::string inPipeline = "v4l2src device=/dev/video0 io-mode=4 ! video/x-raw,width=1920,height=1080,format=RGB,framerate=30/1 !"
@@ -320,12 +340,12 @@ int main(int argc, char **argv)
     gst_element_set_state(data.outPipeline, GST_STATE_PLAYING);
 
     // Video processing thread
-    std::thread ThreadProcessFrames([&data, &fb]{
-        processFrames(data, fb);
+    std::thread ThreadProcessFrames([&data, &fb, &result]{
+        processFrames(data, fb, result);
     });
     // Yolo thread
-    std::thread ThreadRunYolo([&model, &data, &fb]{
-        runYolo(model, data, fb);
+    std::thread ThreadRunYolo([&model, &data, &fb, &result]{
+        runYolo(model, data, fb, result);
     });
     // Now we need two bus threads: one for each pipeline
     std::thread ThreadprocessMsgIn([&data]{
