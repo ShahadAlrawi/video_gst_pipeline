@@ -19,7 +19,7 @@ add_executable(${PROJECT_NAME} src/main.cpp)
 
 target_compile_features(${PROJECT_NAME} PUBLIC cxx_std_17)
 
-target_include_directories(${PROJECT_NAME} PUBLIC ${OpenCV_INCLUDE_DIRS} PUBLIC ${GST_INCLUDE_DIRS}  PUBLIC ./include)
+target_include_directories(${PROJECT_NAME} PUBLIC ${OpenCV_INCLUDE_DIRS} PUBLIC ${GST_INCLUDE_DIRS}  PUBLIC include)
 
 target_link_libraries(${PROJECT_NAME} 
     ${OpenCV_LIBS} ${GST_LIBRARY_DIRS} ${GST_LIBRARIES}

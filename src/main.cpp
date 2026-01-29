@@ -175,15 +175,15 @@ void processFrames(GlobalData &data, const std::string &model)
         gst_buffer_unmap(bufferIn, &mapIn);
         gst_sample_unref(sample);
 
-        // auto result = yolo->run(frame);
-        // cv::Mat frame_out = process_result(frame, result, false);
+        auto result = yolo->run(frame);
+        cv::Mat frame_out = process_result(frame, result, false);
 
         // Create the output bufer and send it to output pipeline
         int bufferSize = frame.cols * frame.rows * 3;
         GstBuffer *bufferOut = gst_buffer_new_and_alloc(bufferSize);
         GstMapInfo mapOut;
         gst_buffer_map(bufferOut, &mapOut, GST_MAP_WRITE);
-        memcpy(mapOut.data, frame.data, bufferSize);
+        memcpy(mapOut.data, frame_out.data, bufferSize);
         gst_buffer_unmap(bufferOut, &mapOut);
 
         // Copy the input packet timestamp
