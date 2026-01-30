@@ -14,8 +14,13 @@ static cv::Scalar getColor(int label)
 }
 
 
-static cv::Mat process_result(cv::Mat& image, const vitis::ai::YOLOv6Result& result_in, bool print_result)
+static cv::Mat process_result(cv::Mat& image, const vitis::ai::YOLOv6Result& result_in, int frame_count)
 {
+    // Text size
+    double font_scale = 1;
+    int thickness = 1;
+    int font = cv::FONT_HERSHEY_SIMPLEX;
+
     /* Print results */
     for (const auto& result : result_in.bboxes)
     {
@@ -24,21 +29,8 @@ static cv::Mat process_result(cv::Mat& image, const vitis::ai::YOLOv6Result& res
 
         // get a color
         cv::Scalar color = getColor(label);
-
-        LOG_IF(INFO, print_result) << "RESULT: " << coco_labels[label] << "\t" << std::fixed
-                                << std::setprecision(2) << box[0] << "\t" << box[1]
-                                << "\t" << box[2] << "\t" << box[3] << "\t"
-                                << std::setprecision(6) << result.score << "\n";
-
         cv::rectangle(image, cv::Point(box[0], box[1]), cv::Point(box[2], box[3]), color, 1, 1, 0);
 
-
-         // Text size
-        int baseline = 0;
-        double font_scale = 0.5;
-        int thickness = 1;
-        int font = cv::FONT_HERSHEY_SIMPLEX;
-        
         // Draw label
         cv::putText(image, coco_labels[label],
                     cv::Point(box[0], box[1]),
@@ -47,5 +39,12 @@ static cv::Mat process_result(cv::Mat& image, const vitis::ai::YOLOv6Result& res
                     color,
                     thickness);
     }
+    // Draw frame number
+    cv::putText(image, std::to_string(frame_count),
+            cv::Point(0, 900),
+            font, 
+            3,
+            cv::Scalar(0, 0, 0),
+            5);
     return image;
 }

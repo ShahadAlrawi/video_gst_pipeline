@@ -180,8 +180,14 @@ void runYolo(const std::string &model, GlobalData &data,  FrameBuffer &fb, Resul
 /// Take frames from appsink, process with opencv, send to appsrc
 void processFrames(GlobalData &data, FrameBuffer &fb, ResultBuffer &result)
 {
+    GstClockTime start = GST_CLOCK_TIME_NONE;
+    int frame_counter = 0;
+
     for (;;)
     {
+        // increment frame
+        frame_counter++;
+
         // Wait until output pipeline needs data
         while (!data.runFlag) {
             std::cout << "(wait)" << std::endl;
@@ -232,7 +238,7 @@ void processFrames(GlobalData &data, FrameBuffer &fb, ResultBuffer &result)
         // Find which result is current
         int current = result.index.load();
 
-        cv::Mat frame_out = process_result(frame, result.output[current], false);
+        cv::Mat frame_out = process_result(frame, result.output[current], frame_counter);
         ///////////////////////////////////////////////////////////////////////
     
 
@@ -254,7 +260,29 @@ void processFrames(GlobalData &data, FrameBuffer &fb, ResultBuffer &result)
         {
             gst_buffer_unref(bufferOut);
         }
+
+
+        ///////////////////////////////////////////////////////////////////////
+        // Timer start
+        if (start == GST_CLOCK_TIME_NONE)
+        {
+            start = gst_util_get_timestamp();
+        }
+
+        // Timer stop
+        GstClockTime now = gst_util_get_timestamp();
+        double seconds = (now - start) / 1e9;
+
+        if (seconds >= 1.0)
+        {
+            double FPS = frame_counter / seconds;
+            std::cout<<"FPS: "<< FPS << std::endl;
+            start = now;
+            frame_counter = 0;
+        }
+        ///////////////////////////////////////////////////////////////////////
     }
+
     // Send EOS to output pipeline
     gst_app_src_end_of_stream(GST_APP_SRC(data.outPipelineSink));
     data.endFlag = true;
