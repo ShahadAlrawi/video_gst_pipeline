@@ -342,7 +342,7 @@ int main(int argc, char **argv)
 
     // Input pipeline
     std::string inPipeline = "v4l2src device=/dev/video0 io-mode=4 ! video/x-raw,width=1920,height=1080,format=RGB,framerate=30/1 !"
-                        "appsink name=input_src sync=true max-buffers=2";
+                        "appsink name=input_src sync=true drop=true max-buffers=2";
 
 
 
