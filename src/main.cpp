@@ -16,6 +16,10 @@
 #include <vitis/ai/yolov6.hpp>
 #include "process_result.hpp"
 
+#define NMS_THRESHOLD 0.3f
+#define CONF_THRESHOLD 0.5f
+
+
 //======================================================================================================================
 /// A simple assertion function + macro
 inline void myAssert(bool b, const std::string &s = "Assersion error")
@@ -237,8 +241,8 @@ void processFrames(GlobalData &data, FrameBuffer &fb, ResultBuffer &result)
         ///////////////////////////////////////////////////////////////////////
         // Find which result is current
         int current = result.index.load();
-
-        cv::Mat frame_out = process_result(frame, result.output[current], frame_counter);
+        std::vector<vitis::ai::YOLOv6Result::BoundingBox> result_bbox = nms_and_conf(result.output[current], NMS_THRESHOLD, CONF_THRESHOLD);
+        cv::Mat frame_out = process_result(frame, result_bbox);
         ///////////////////////////////////////////////////////////////////////
     
 
