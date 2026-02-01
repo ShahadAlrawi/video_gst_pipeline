@@ -15,6 +15,7 @@
 #include <opencv2/opencv.hpp>
 #include <vitis/ai/yolov6.hpp>
 #include "process_result.hpp"
+#include "triple_buffer.hpp"
 
 #define NMS_THRESHOLD 0.3f
 #define CONF_THRESHOLD 0.5f
@@ -63,16 +64,12 @@ struct GlobalData
 };
 
 
-struct FrameBuffer {
-    cv::Mat frames[2];
-    std::atomic<int> index{0};  // which frame is current
-};
+TripleBuffer buffer_frames;
+cv::Mat frames[3];
 
-struct ResultBuffer {
-    vitis::ai::YOLOv6Result output[2];
-    std::atomic<int> index{0};  // which result is current
+TripleBuffer buffer_results;
+vitis::ai::YOLOv6Result results[3];
 
-};
 
 
 //======================================================================================================================
@@ -144,7 +141,7 @@ void processMsg(GstElement *pipeline, GlobalData &data, const std::string &prefi
 
 //======================================================================================================================
 /// Run the message loop for one bus
-void runYolo(const std::string &model, GlobalData &data,  FrameBuffer &fb, ResultBuffer &result)
+void runYolo(const std::string &model, GlobalData &data)
 {
     auto yolo = vitis::ai::YOLOv6::create(model, true);
 
@@ -157,22 +154,23 @@ void runYolo(const std::string &model, GlobalData &data,  FrameBuffer &fb, Resul
     for (;;)
     {
         ///////////////////////////////////////////////////////////////////////
-        // Find which index is current
-        int frame_current = fb.index.load();
-        int result_next = 1 - result.index.load();
+        // Get frame reader index
+        auto [frame_idx, updated] = buffer_frames.get_for_reader();
+        if (! updated)
+            continue;
 
+        // Get result writer index
+        int result_idx = buffer_results.get_for_writer();
+        
         // Run yolo on the current frame
-        result.output[result_next] = yolo->run(fb.frames[frame_current]);
+        results[result_idx] = yolo->run(frames[frame_idx]);
 
-        // Publish result (atomic flip)
-        result.index.store(result_next);
+        // Publish result 
+        buffer_results.publish();
         ///////////////////////////////////////////////////////////////////////
 
         if (data.endFlag)
-        {
             break;
-        }
-
     }
 
     
@@ -182,10 +180,11 @@ void runYolo(const std::string &model, GlobalData &data,  FrameBuffer &fb, Resul
 
 //======================================================================================================================
 /// Take frames from appsink, process with opencv, send to appsrc
-void processFrames(GlobalData &data, FrameBuffer &fb, ResultBuffer &result)
+void processFrames(GlobalData &data)
 {
     GstClockTime start = GST_CLOCK_TIME_NONE;
     int frame_counter = 0;
+    std::vector<vitis::ai::YOLOv6Result::BoundingBox> result_bbox;
 
     for (;;)
     {
@@ -227,21 +226,23 @@ void processFrames(GlobalData &data, FrameBuffer &fb, ResultBuffer &result)
         gst_sample_unref(sample);
 
         ///////////////////////////////////////////////////////////////////////
-        // Find which index is next
-        int next = 1 - fb.index.load();
+        // Get frame writer
+        int frame_idx = buffer_frames.get_for_writer();
 
         // Copy into inactive buffer
-        frame.copyTo(fb.frames[next]);
+        frame.copyTo(frames[frame_idx]);
 
-        // Publish frame (atomic flip)
-        fb.index.store(next);
+        // Publish frame
+        buffer_frames.publish();
         ///////////////////////////////////////////////////////////////////////
 
-
         ///////////////////////////////////////////////////////////////////////
-        // Find which result is current
-        int current = result.index.load();
-        std::vector<vitis::ai::YOLOv6Result::BoundingBox> result_bbox = nms_and_conf(result.output[current], NMS_THRESHOLD, CONF_THRESHOLD);
+        // Get result reader
+        auto [result_idx, updated] = buffer_results.get_for_reader();
+        if (updated)
+        {
+            result_bbox = nms_and_conf(results[result_idx], NMS_THRESHOLD, CONF_THRESHOLD);
+        }
         cv::Mat frame_out = process_result(frame, result_bbox);
         ///////////////////////////////////////////////////////////////////////
     
@@ -337,14 +338,10 @@ int main(int argc, char **argv)
 
     // Our global data
     GlobalData data;
-    FrameBuffer fb;
-    ResultBuffer result;
 
     // Input pipeline
     std::string inPipeline = "v4l2src device=/dev/video0 io-mode=4 ! video/x-raw,width=1920,height=1080,format=RGB,framerate=30/1 !"
                         "appsink name=input_src sync=true drop=true max-buffers=2";
-
-
 
     // Output pipeline
     std::string outPipeline = "appsrc name=output_sink do-timestamp=true format=time caps=video/x-raw,format=RGB,width=1920,height=1080,framerate=30/1 !"
@@ -372,12 +369,12 @@ int main(int argc, char **argv)
     gst_element_set_state(data.outPipeline, GST_STATE_PLAYING);
 
     // Video processing thread
-    std::thread ThreadProcessFrames([&data, &fb, &result]{
-        processFrames(data, fb, result);
+    std::thread ThreadProcessFrames([&data]{
+        processFrames(data);
     });
     // Yolo thread
-    std::thread ThreadRunYolo([&model, &data, &fb, &result]{
-        runYolo(model, data, fb, result);
+    std::thread ThreadRunYolo([&model, &data]{
+        runYolo(model, data);
     });
     // Now we need two bus threads: one for each pipeline
     std::thread ThreadprocessMsgIn([&data]{

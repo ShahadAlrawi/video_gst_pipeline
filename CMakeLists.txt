@@ -15,7 +15,7 @@ message(STATUS "OpenCV Include dirs = ${OpenCV_INCLUDE_DIRS}")
 message(STATUS "OpenCV LIBRARIES = ${OpenCV_LIBS}")
 
 
-add_executable(${PROJECT_NAME} src/main.cpp)
+add_executable(${PROJECT_NAME} src/main.cpp src/triple_buffer.cpp)
 
 target_compile_features(${PROJECT_NAME} PUBLIC cxx_std_17)
 
