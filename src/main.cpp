@@ -345,7 +345,6 @@ int main(int argc, char **argv)
 
     // Output pipeline
     std::string outPipeline = "appsrc name=output_sink do-timestamp=true format=time caps=video/x-raw,format=RGB,width=1920,height=1080,framerate=30/1 !"
-                        " queue !"
                         " kmssink bus-id=fd4a0000.display sync=true fullscreen-overlay=true";
     
     
